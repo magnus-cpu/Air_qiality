@@ -3,7 +3,11 @@
 #include "nvs_flash.h"
 
 #include "heater.h"
+#include "mqtt_manager.h"
+#include "sd_card.h"
 #include "sensor.h"
+#include "telemetry_pipeline.h"
+#include "time_manager.h"
 #include "web_server.h"
 #include "wifi_manager.h"
 
@@ -15,6 +19,10 @@ void app_main(void)
 
     heater_init();
     sensor_init();
+    sd_card_init();
     wifi_manager_init();
+    time_manager_init();
+    mqtt_manager_init();
+    telemetry_pipeline_init();
     web_server_start();
 }
