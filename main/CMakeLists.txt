@@ -9,5 +9,7 @@ idf_component_register(
         "time_manager.c"
         "mqtt_manager.c"
         "telemetry_pipeline.c"
+        "site_config.c"
+        "device_registry.c"
     INCLUDE_DIRS "."
 )

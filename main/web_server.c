@@ -1,8 +1,12 @@
 #include "web_server.h"
 
+#include <dirent.h>
+#include <inttypes.h>
 #include <stdio.h>
+#include <strings.h>
 #include <string.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 
 #include "esp_err.h"
 #include "esp_http_server.h"
@@ -12,6 +16,7 @@
 #include "mqtt_manager.h"
 #include "sd_card.h"
 #include "sensor.h"
+#include "site_config.h"
 #include "telemetry_pipeline.h"
 #include "time_manager.h"
 #include "wifi_manager.h"
@@ -108,6 +113,21 @@ static size_t json_escape(char *dst, size_t dst_len, const char *src)
     return di;
 }
 
+static bool is_telemetry_file_name(const char *name)
+{
+    if (!name) {
+        return false;
+    }
+
+    size_t len = strlen(name);
+    if (len <= 4 || strcasecmp(name + len - 4, ".csv") != 0) {
+        return false;
+    }
+
+    return strncasecmp(name, "tm", 2) == 0 ||
+           strncasecmp(name, "telemetry_", 10) == 0;
+}
+
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
     const char *html =
@@ -138,7 +158,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         ".mini .value{font-size:13px;font-weight:700;}"
         ".statusline{margin-top:10px;font-size:12px;color:var(--muted);min-height:16px;}"
         ".dock{position:fixed;left:0;right:0;bottom:0;background:rgba(9,12,16,0.92);backdrop-filter:blur(8px);padding:10px 12px;border-top:1px solid #1f2a36;}"
-        ".dock .row{max-width:520px;margin:0 auto;display:grid;grid-template-columns:repeat(3,1fr);gap:10px;}"
+        ".dock .row{max-width:520px;margin:0 auto;display:grid;grid-template-columns:repeat(4,1fr);gap:10px;}"
         ".dock a{display:block;text-align:center;text-decoration:none;color:var(--ink);padding:10px 0;border-radius:8px;background:#111821;border:1px solid #1f2a36;font-size:13px;}"
         ".dock a.active{border-color:var(--accent);color:var(--accent);}"
         "@media (max-width:420px){.split{grid-template-columns:1fr;}}"
@@ -158,6 +178,11 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "<label>Wi‑Fi SSID</label><input id='ssid' name='ssid' placeholder='Your router name' required>"
         "<label>Password</label><input name='pass' type='password' placeholder='Optional'>"
         "<label class='row'><input id='hidden' name='hidden' type='checkbox' value='1'>Hidden network</label>"
+        "<label>Location name</label><input id='location_name' name='location_name' placeholder='Site, village, station'>"
+        "<label>Latitude</label><input id='latitude' name='latitude' placeholder='-6.7924'>"
+        "<label>Longitude</label><input id='longitude' name='longitude' placeholder='39.2083'>"
+        "<button class='btn ghost' type='button' onclick='saveSiteConfig()'>Save location only</button>"
+        "<div id='site_config_status' class='statusline'></div>"
         "<button class='btn' type='submit'>Save & Connect</button>"
         "</form>"
         "</div>"
@@ -197,6 +222,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "<nav class='dock'><div class='row'>"
         "<a class='active' href='/' data-label='Setup'>Setup</a>"
         "<a href='/status' data-label='Status'>Status</a>"
+        "<a href='/files' data-label='Files'>Files</a>"
         "<a href='/chat' data-label='Chat'>Chat</a>"
         "</div></nav>"
         "<script>"
@@ -206,12 +232,14 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "async function scanWifi(){const box=document.getElementById('networks');box.innerHTML='<p class=\"empty\">Scanning...</p>';try{const r=await fetch('/api/wifi/scan');const j=await r.json();box.innerHTML=j.networks.length?j.networks.map(n=>'<button class=\"net\" type=\"button\" data-hidden=\"0\" data-ssid=\"'+esc(n.ssid)+'\"><span class=\"ssid\">'+esc(n.ssid)+'</span><span class=\"meta\">'+n.rssi+' dBm</span><span class=\"meta\">'+esc(n.auth)+'</span><span class=\"saved\">'+(n.saved?'saved':'')+'</span></button>').join(''):'<p class=\"empty\">No visible networks found.</p>';bind(box);}catch(e){box.innerHTML='<p class=\"empty\">Scan failed.</p>';}}"
         "async function loadHistory(){const box=document.getElementById('history');try{const r=await fetch('/api/wifi/history');const j=await r.json();box.innerHTML=j.networks.length?j.networks.map(n=>'<button class=\"net\" type=\"button\" data-hidden=\"'+(n.hidden?'1':'0')+'\" data-ssid=\"'+esc(n.ssid)+'\"><span class=\"ssid\">'+esc(n.ssid)+'</span><span class=\"meta\">'+(n.hidden?'hidden':'known')+'</span></button>').join(''):'<p class=\"empty\">No saved networks yet.</p>';bind(box);}catch(e){box.innerHTML='<p class=\"empty\">History unavailable.</p>';}}"
         "async function loadMqtt(){try{const r=await fetch('/api/mqtt/config');const j=await r.json();document.getElementById('mqtt_uri').value=j.broker_uri||'';document.getElementById('mqtt_topic').value=j.base_topic||'air_quality';document.getElementById('mqtt_enabled').checked=!!j.enabled;}catch(e){}}"
+        "async function loadSiteConfig(){try{const r=await fetch('/api/site-config');const j=await r.json();document.getElementById('location_name').value=j.location_name||'';document.getElementById('latitude').value=j.latitude||'';document.getElementById('longitude').value=j.longitude||'';}catch(e){}}"
+        "async function saveSiteConfig(){const status=document.getElementById('site_config_status');status.textContent='Saving location...';const body='location_name='+encodeURIComponent(document.getElementById('location_name').value)+'&latitude='+encodeURIComponent(document.getElementById('latitude').value)+'&longitude='+encodeURIComponent(document.getElementById('longitude').value);try{const r=await fetch('/api/site-config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});if(!r.ok){throw new Error('save failed');}status.textContent='Location saved.';}catch(e){status.textContent='Location save failed.';}}"
         "function fmt(v){return typeof v==='number'&&isFinite(v)?v.toFixed(2)+' ohms':'-';}"
         "async function loadCalibration(){const saved=document.getElementById('cal_saved');try{const r=await fetch('/api/sensor/calibration');const j=await r.json();document.getElementById('cal_nh3_ppm').value=j.nh3.valid?j.nh3.reference_ppm:'';document.getElementById('cal_red_ppm').value=j.red.valid?j.red.reference_ppm:'';document.getElementById('cal_ox_ppm').value=j.ox.valid?j.ox.reference_ppm:'';saved.textContent=(j.nh3.valid&&j.red.valid&&j.ox.valid)?('Saved refs: NH3 '+j.nh3.reference_ppm+' ppm at '+j.nh3.reference_resistance_ohms.toFixed(2)+' ohms, RED '+j.red.reference_ppm+' ppm at '+j.red.reference_resistance_ohms.toFixed(2)+' ohms, OX '+j.ox.reference_ppm+' ppm at '+j.ox.reference_resistance_ohms.toFixed(2)+' ohms'):'No full calibration saved yet.';}catch(e){saved.textContent='Calibration state unavailable.';}}"
         "async function loadLiveCalibrationReadings(){try{const r=await fetch('/api/status');const j=await r.json();document.getElementById('live_nh3_res').textContent=fmt(j.nh3_res_ohms);document.getElementById('live_red_res').textContent=fmt(j.red_res_ohms);document.getElementById('live_ox_res').textContent=fmt(j.ox_res_ohms);}catch(e){}}"
         "async function saveCalibration(ev){ev.preventDefault();const status=document.getElementById('cal_status');status.textContent='Saving calibration...';const body='nh3_ppm='+encodeURIComponent(document.getElementById('cal_nh3_ppm').value)+'&red_ppm='+encodeURIComponent(document.getElementById('cal_red_ppm').value)+'&ox_ppm='+encodeURIComponent(document.getElementById('cal_ox_ppm').value);try{const r=await fetch('/api/sensor/calibration',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});if(!r.ok){throw new Error('save failed');}status.textContent='Calibration saved from current stabilized resistances.';loadCalibration();loadLiveCalibrationReadings();}catch(e){status.textContent='Calibration save failed.';}}"
         "async function formatSdCard(){const status=document.getElementById('sd_format_status');if(!confirm('Format the SD card to FAT and erase all stored telemetry data?')){return;}status.textContent='Formatting SD card...';try{const r=await fetch('/api/sd/format',{method:'POST'});const text=await r.text();if(!r.ok){throw new Error(text||'format failed');}status.textContent='SD card formatted successfully.';}catch(e){status.textContent='SD format failed.';}}"
-        "scanWifi();loadHistory();loadMqtt();loadCalibration();loadLiveCalibrationReadings();setInterval(loadLiveCalibrationReadings,3000);"
+        "scanWifi();loadHistory();loadMqtt();loadSiteConfig();loadCalibration();loadLiveCalibrationReadings();setInterval(loadLiveCalibrationReadings,3000);"
         "</script></body></html>";
 
     httpd_resp_set_type(req, "text/html");
@@ -221,11 +249,11 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 static esp_err_t save_post_handler(httpd_req_t *req)
 {
     int total_len = req->content_len;
-    if (total_len <= 0 || total_len > 512) {
+    if (total_len <= 0 || total_len > 1024) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body");
     }
 
-    char body[513];
+    char body[1025];
     int received = 0;
     while (received < total_len) {
         int r = httpd_req_recv(req, body + received, total_len - received);
@@ -239,13 +267,23 @@ static esp_err_t save_post_handler(httpd_req_t *req)
     char ssid[33] = {0};
     char pass[65] = {0};
     char hidden_value[8] = {0};
+    site_config_t site = {0};
     if (!parse_form_value(body, "ssid", ssid, sizeof(ssid))) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "SSID missing");
     }
     parse_form_value(body, "pass", pass, sizeof(pass));
     bool hidden = parse_form_value(body, "hidden", hidden_value, sizeof(hidden_value));
+    parse_form_value(body, "location_name", site.location_name, sizeof(site.location_name));
+    parse_form_value(body, "latitude", site.latitude, sizeof(site.latitude));
+    parse_form_value(body, "longitude", site.longitude, sizeof(site.longitude));
 
-    esp_err_t err = wifi_manager_save_and_connect_ex(ssid, pass, hidden);
+    esp_err_t err = site_config_save(&site);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to save site config: %s", esp_err_to_name(err));
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to save location");
+    }
+
+    err = wifi_manager_save_and_connect_ex(ssid, pass, hidden);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to save Wi-Fi creds: %s", esp_err_to_name(err));
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to save");
@@ -263,6 +301,60 @@ static esp_err_t save_post_handler(httpd_req_t *req)
         "</body></html>";
     httpd_resp_set_type(req, "text/html");
     return httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t api_site_config_get_handler(httpd_req_t *req)
+{
+    site_config_t site = {0};
+    site_config_load(&site);
+
+    char location_name[128] = {0};
+    char latitude[48] = {0};
+    char longitude[48] = {0};
+    json_escape(location_name, sizeof(location_name), site.location_name);
+    json_escape(latitude, sizeof(latitude), site.latitude);
+    json_escape(longitude, sizeof(longitude), site.longitude);
+
+    char resp[320];
+    snprintf(resp, sizeof(resp),
+             "{\"location_name\":\"%s\",\"latitude\":\"%s\",\"longitude\":\"%s\"}",
+             location_name, latitude, longitude);
+
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t api_site_config_post_handler(httpd_req_t *req)
+{
+    int total_len = req->content_len;
+    if (total_len <= 0 || total_len > 512) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body");
+    }
+
+    char body[513];
+    int received = 0;
+    while (received < total_len) {
+        int r = httpd_req_recv(req, body + received, total_len - received);
+        if (r <= 0) {
+            return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to receive body");
+        }
+        received += r;
+    }
+    body[total_len] = '\0';
+
+    site_config_t site = {0};
+    parse_form_value(body, "location_name", site.location_name, sizeof(site.location_name));
+    parse_form_value(body, "latitude", site.latitude, sizeof(site.latitude));
+    parse_form_value(body, "longitude", site.longitude, sizeof(site.longitude));
+
+    esp_err_t err = site_config_save(&site);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to save site config: %s", esp_err_to_name(err));
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to save location");
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, "{\"ok\":true}", HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t mqtt_post_handler(httpd_req_t *req)
@@ -336,7 +428,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         ".btn{flex:1;padding:12px;border:0;border-radius:12px;background:#111821;color:var(--ink);border:1px solid #1f2a36;}"
         ".btn.on{background:linear-gradient(90deg,var(--accent),var(--accent2));color:#041015;font-weight:700;}"
         ".dock{position:fixed;left:0;right:0;bottom:0;background:rgba(9,12,16,0.92);backdrop-filter:blur(8px);padding:10px 12px;border-top:1px solid #1f2a36;}"
-        ".dock .row{max-width:520px;margin:0 auto;display:grid;grid-template-columns:repeat(3,1fr);gap:10px;}"
+        ".dock .row{max-width:520px;margin:0 auto;display:grid;grid-template-columns:repeat(4,1fr);gap:10px;}"
         ".dock a{display:block;text-align:center;text-decoration:none;color:var(--ink);padding:10px 0;border-radius:12px;background:#111821;border:1px solid #1f2a36;font-size:13px;}"
         ".dock a.active{border-color:var(--accent);color:var(--accent);}"
         "</style></head><body>"
@@ -350,6 +442,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "<div class='grid'><div class='label'>Warm-up</div><div class='value' id='warmup'>-</div></div>"
         "<div class='grid'><div class='label'>Wi‑Fi</div><div class='value' id='wifi'>-</div></div>"
         "<div class='grid'><div class='label'>SD card</div><div class='value' id='sd'>-</div></div>"
+        "<div class='grid'><div class='label'>SD mode</div><div class='value' id='sdmode'>-</div></div>"
         "<div class='grid'><div class='label'>MQTT</div><div class='value' id='mqtt'>-</div></div>"
         "</div>"
         "<div class='btns'>"
@@ -360,6 +453,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "<nav class='dock'><div class='row'>"
         "<a href='/' data-label='Setup'>Setup</a>"
         "<a class='active' href='/status' data-label='Status'>Status</a>"
+        "<a href='/files' data-label='Files'>Files</a>"
         "<a href='/chat' data-label='Chat'>Chat</a>"
         "</div></nav>"
         "<script>"
@@ -386,6 +480,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "}"
         "document.getElementById('wifi').textContent=j.wifi;"
         "document.getElementById('sd').textContent=j.sd_card;"
+        "document.getElementById('sdmode').textContent=j.sd_mode;"
         "document.getElementById('mqtt').textContent=j.mqtt;"
         "}"
         "async function setHeater(v){await fetch('/api/heater?value='+v);load();}"
@@ -412,7 +507,7 @@ static esp_err_t chat_get_handler(httpd_req_t *req)
         "input,textarea{width:100%;padding:12px;border-radius:12px;border:1px solid #2a3746;background:#0e151c;color:var(--ink);font-size:15px;}"
         ".btn{width:100%;margin-top:12px;padding:12px;border:0;border-radius:12px;background:#111821;color:var(--ink);border:1px solid #1f2a36;}"
         ".dock{position:fixed;left:0;right:0;bottom:0;background:rgba(9,12,16,0.92);backdrop-filter:blur(8px);padding:10px 12px;border-top:1px solid #1f2a36;}"
-        ".dock .row{max-width:520px;margin:0 auto;display:grid;grid-template-columns:repeat(3,1fr);gap:10px;}"
+        ".dock .row{max-width:520px;margin:0 auto;display:grid;grid-template-columns:repeat(4,1fr);gap:10px;}"
         ".dock a{display:block;text-align:center;text-decoration:none;color:var(--ink);padding:10px 0;border-radius:12px;background:#111821;border:1px solid #1f2a36;font-size:13px;}"
         ".dock a.active{border-color:var(--accent);color:var(--accent);}"
         "</style></head><body>"
@@ -429,9 +524,59 @@ static esp_err_t chat_get_handler(httpd_req_t *req)
         "<nav class='dock'><div class='row'>"
         "<a href='/' data-label='Setup'>Setup</a>"
         "<a href='/status' data-label='Status'>Status</a>"
+        "<a href='/files' data-label='Files'>Files</a>"
         "<a class='active' href='/chat' data-label='Chat'>Chat</a>"
         "</div></nav>"
         "</body></html>";
+
+    httpd_resp_set_type(req, "text/html");
+    return httpd_resp_send(req, html, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t files_get_handler(httpd_req_t *req)
+{
+    const char *html =
+        "<!DOCTYPE html>"
+        "<html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+        "<title>Files</title>"
+        "<style>"
+        ":root{--bg:#0b0f12;--card:#141b22;--ink:#e8f1ff;--muted:#9fb0c7;--accent:#48d18f;}"
+        "*{box-sizing:border-box;}body{margin:0;font-family:'Avenir Next','Trebuchet MS',sans-serif;background:radial-gradient(120% 120% at 10% 0%,#1b2430 0%,#0b0f12 60%);color:var(--ink);}"
+        ".wrap{max-width:520px;margin:0 auto;padding:20px 18px 92px;}"
+        ".card{padding:14px;border-radius:16px;background:var(--card);margin-top:14px;}"
+        ".list{display:grid;gap:10px;}"
+        ".file{padding:12px;border-radius:12px;background:#0e151c;border:1px solid #223042;}"
+        ".name{font-weight:700;word-break:break-word;}"
+        ".meta{margin-top:4px;color:var(--muted);font-size:12px;}"
+        ".badge{display:inline-block;margin-top:8px;padding:4px 10px;border-radius:999px;font-size:11px;border:1px solid #223042;background:#0f1720;color:var(--muted);}"
+        ".badge.active{border-color:var(--accent);color:var(--accent);}"
+        ".empty{color:var(--muted);font-size:13px;}"
+        ".btn{width:100%;margin-top:12px;padding:12px;border:0;border-radius:12px;background:#111821;color:var(--ink);border:1px solid #1f2a36;}"
+        ".dock{position:fixed;left:0;right:0;bottom:0;background:rgba(9,12,16,0.92);backdrop-filter:blur(8px);padding:10px 12px;border-top:1px solid #1f2a36;}"
+        ".dock .row{max-width:520px;margin:0 auto;display:grid;grid-template-columns:repeat(4,1fr);gap:10px;}"
+        ".dock a{display:block;text-align:center;text-decoration:none;color:var(--ink);padding:10px 0;border-radius:12px;background:#111821;border:1px solid #1f2a36;font-size:13px;}"
+        ".dock a.active{border-color:var(--accent);color:var(--accent);}"
+        "</style></head><body>"
+        "<div class='wrap'>"
+        "<h2>Files</h2>"
+        "<div class='card'>"
+        "<div id='files' class='list'><p class='empty'>Loading files...</p></div>"
+        "<button class='btn' type='button' onclick='loadFiles()'>Refresh file list</button>"
+        "</div>"
+        "</div>"
+        "<nav class='dock'><div class='row'>"
+        "<a href='/' data-label='Setup'>Setup</a>"
+        "<a href='/status' data-label='Status'>Status</a>"
+        "<a class='active' href='/files' data-label='Files'>Files</a>"
+        "<a href='/chat' data-label='Chat'>Chat</a>"
+        "</div></nav>"
+        "<script>"
+        "function esc(s){return String(s||'').replace(/[&<>\"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[m]));}"
+        "function fmtSize(n){if(n<1024)return n+' B';if(n<1024*1024)return (n/1024).toFixed(1)+' KB';return (n/(1024*1024)).toFixed(2)+' MB';}"
+        "async function loadFiles(){const box=document.getElementById('files');box.innerHTML='<p class=\"empty\">Loading files...</p>';try{const r=await fetch('/api/files');const j=await r.json();box.innerHTML=j.files.length?j.files.map(f=>'<div class=\"file\"><div class=\"name\">'+esc(f.name)+'</div><div class=\"meta\">'+fmtSize(f.size_bytes)+' - '+esc(f.path)+'</div>'+(f.active?'<span class=\"badge active\">active today file</span>':'<span class=\"badge\">pending upload</span>')+'</div>').join(''):'<p class=\"empty\">No telemetry files found on the SD card.</p>';}catch(e){box.innerHTML='<p class=\"empty\">File list unavailable.</p>';}}"
+        "loadFiles();"
+        "</script></body></html>";
 
     httpd_resp_set_type(req, "text/html");
     return httpd_resp_send(req, html, HTTPD_RESP_USE_STRLEN);
@@ -459,28 +604,47 @@ static esp_err_t api_status_get_handler(httpd_req_t *req)
     wifi_manager_get_ip(ip_str, sizeof(ip_str));
     char sd_status[96] = {0};
     sd_card_get_status(sd_status, sizeof(sd_status));
+    char sd_mode[48] = {0};
+    sd_card_get_mode(sd_mode, sizeof(sd_mode));
     char mqtt_status[128] = {0};
     mqtt_manager_get_status(mqtt_status, sizeof(mqtt_status));
     char mqtt_json[180] = {0};
     json_escape(mqtt_json, sizeof(mqtt_json), mqtt_status);
+    char sd_mode_json[64] = {0};
+    json_escape(sd_mode_json, sizeof(sd_mode_json), sd_mode);
     char time_status[128] = {0};
     time_manager_get_status(time_status, sizeof(time_status));
     char time_json[160] = {0};
     json_escape(time_json, sizeof(time_json), time_status);
+    site_config_t site = {0};
+    site_config_load(&site);
+    char location_name[128] = {0};
+    char latitude[48] = {0};
+    char longitude[48] = {0};
+    char today_file[128] = {0};
+    json_escape(location_name, sizeof(location_name), have_sample ? sample.location_name : site.location_name);
+    json_escape(latitude, sizeof(latitude), have_sample ? sample.latitude : site.latitude);
+    json_escape(longitude, sizeof(longitude), have_sample ? sample.longitude : site.longitude);
+    telemetry_pipeline_get_today_file(today_file, sizeof(today_file));
+    char today_file_json[160] = {0};
+    json_escape(today_file_json, sizeof(today_file_json), today_file);
 
     const char *wifi_state = (have_sample ? sample.wifi_connected : wifi_manager_is_connected()) ? "connected" : "disconnected";
 
-    char resp[1280];
+    char resp[1792];
     snprintf(resp, sizeof(resp),
              "{\"nh3_raw\":%d,\"red_raw\":%d,\"ox_raw\":%d,"
+             "\"location_name\":\"%s\",\"latitude\":\"%s\",\"longitude\":\"%s\","
              "\"nh3_mv\":%d,\"red_mv\":%d,\"ox_mv\":%d,"
              "\"nh3_res_ohms\":%.3f,\"red_res_ohms\":%.3f,\"ox_res_ohms\":%.3f,"
              "\"nh3_ppm\":%.3f,\"red_ppm\":%.3f,\"ox_ppm\":%.3f,"
              "\"nh3_ppm_valid\":%s,\"red_ppm_valid\":%s,\"ox_ppm_valid\":%s,"
              "\"heater_on\":%d,\"warmup\":%d,\"since_change\":%d,"
-             "\"wifi\":\"%s (%s)\",\"sd_card\":\"%s\",\"mqtt\":\"%s\","
-             "\"time\":\"%s\",\"time_synced\":%s,\"timestamp_ms\":%" PRIu64 "}",
+             "\"wifi\":\"%s (%s)\",\"sd_card\":\"%s\",\"sd_mode\":\"%s\",\"mqtt\":\"%s\","
+             "\"time\":\"%s\",\"time_synced\":%s,\"timestamp_ms\":%" PRIu64 ","
+             "\"today_file\":\"%s\"}",
              nh3_raw, red_raw, ox_raw,
+             location_name, latitude, longitude,
              nh3_mv, red_mv, ox_mv,
              have_sample ? sample.nh3_res_ohms : sensor_snapshot.nh3.resistance_ohms,
              have_sample ? sample.red_res_ohms : sensor_snapshot.red.resistance_ohms,
@@ -492,13 +656,78 @@ static esp_err_t api_status_get_handler(httpd_req_t *req)
              (have_sample ? sample.red_ppm_valid : sensor_snapshot.red.ppm_valid) ? "true" : "false",
              (have_sample ? sample.ox_ppm_valid : sensor_snapshot.ox.ppm_valid) ? "true" : "false",
              heater_on, warmup, since_change,
-             wifi_state, ip_str, sd_status, mqtt_json,
+             wifi_state, ip_str, sd_status, sd_mode_json, mqtt_json,
              time_json,
              (have_sample ? sample.time_synced : time_manager_is_synchronized()) ? "true" : "false",
-             have_sample ? sample.timestamp_ms : time_manager_get_epoch_ms());
+             have_sample ? sample.timestamp_ms : time_manager_get_epoch_ms(),
+             today_file_json);
 
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t api_files_get_handler(httpd_req_t *req)
+{
+    char active_path[128] = {0};
+    telemetry_pipeline_get_today_file(active_path, sizeof(active_path));
+
+    if (sd_card_begin_io() != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "SD card busy");
+    }
+
+    DIR *dir = opendir(SD_CARD_MOUNT_POINT);
+    if (!dir) {
+        sd_card_end_io();
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to open SD card");
+    }
+
+    char *resp = calloc(1, 4096);
+    if (!resp) {
+        closedir(dir);
+        sd_card_end_io();
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+    }
+
+    size_t pos = 0;
+    pos += snprintf(resp + pos, 4096 - pos, "{\"files\":[");
+
+    struct dirent *entry = NULL;
+    bool first = true;
+    while ((entry = readdir(dir)) != NULL && pos < 3800) {
+        if (!is_telemetry_file_name(entry->d_name)) {
+            continue;
+        }
+
+        char full_path[128];
+        strlcpy(full_path, SD_CARD_MOUNT_POINT "/", sizeof(full_path));
+        strlcat(full_path, entry->d_name, sizeof(full_path));
+
+        struct stat st = {0};
+        if (stat(full_path, &st) != 0) {
+            continue;
+        }
+
+        char name_json[96] = {0};
+        char path_json[160] = {0};
+        json_escape(name_json, sizeof(name_json), entry->d_name);
+        json_escape(path_json, sizeof(path_json), full_path);
+        pos += snprintf(resp + pos, 4096 - pos,
+                        "%s{\"name\":\"%s\",\"path\":\"%s\",\"size_bytes\":%ld,\"active\":%s}",
+                        first ? "" : ",",
+                        name_json,
+                        path_json,
+                        (long)st.st_size,
+                        strcmp(full_path, active_path) == 0 ? "true" : "false");
+        first = false;
+    }
+    closedir(dir);
+    sd_card_end_io();
+
+    snprintf(resp + pos, 4096 - pos, "]}");
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t err = httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
+    free(resp);
+    return err;
 }
 
 static esp_err_t api_heater_get_handler(httpd_req_t *req)
@@ -668,7 +897,7 @@ void web_server_start(void)
 {
     httpd_handle_t server = NULL;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 14;
+    config.max_uri_handlers = 18;
     config.stack_size = 8192;
 
     if (httpd_start(&server, &config) == ESP_OK) {
@@ -702,10 +931,20 @@ void web_server_start(void)
             .method = HTTP_GET,
             .handler = chat_get_handler,
         };
+        httpd_uri_t files = {
+            .uri = "/files",
+            .method = HTTP_GET,
+            .handler = files_get_handler,
+        };
         httpd_uri_t api_heater = {
             .uri = "/api/heater",
             .method = HTTP_GET,
             .handler = api_heater_get_handler,
+        };
+        httpd_uri_t api_files = {
+            .uri = "/api/files",
+            .method = HTTP_GET,
+            .handler = api_files_get_handler,
         };
         httpd_uri_t api_wifi_scan = {
             .uri = "/api/wifi/scan",
@@ -721,6 +960,16 @@ void web_server_start(void)
             .uri = "/api/mqtt/config",
             .method = HTTP_GET,
             .handler = api_mqtt_config_get_handler,
+        };
+        httpd_uri_t api_site_config = {
+            .uri = "/api/site-config",
+            .method = HTTP_GET,
+            .handler = api_site_config_get_handler,
+        };
+        httpd_uri_t api_site_config_post = {
+            .uri = "/api/site-config",
+            .method = HTTP_POST,
+            .handler = api_site_config_post_handler,
         };
         httpd_uri_t api_sensor_calibration_get = {
             .uri = "/api/sensor/calibration",
@@ -744,10 +993,14 @@ void web_server_start(void)
         httpd_register_uri_handler(server, &status);
         httpd_register_uri_handler(server, &api_status);
         httpd_register_uri_handler(server, &chat);
+        httpd_register_uri_handler(server, &files);
         httpd_register_uri_handler(server, &api_heater);
+        httpd_register_uri_handler(server, &api_files);
         httpd_register_uri_handler(server, &api_wifi_scan);
         httpd_register_uri_handler(server, &api_wifi_history);
         httpd_register_uri_handler(server, &api_mqtt_config);
+        httpd_register_uri_handler(server, &api_site_config);
+        httpd_register_uri_handler(server, &api_site_config_post);
         httpd_register_uri_handler(server, &api_sensor_calibration_get);
         httpd_register_uri_handler(server, &api_sensor_calibration_post);
         httpd_register_uri_handler(server, &api_sd_format_post);

@@ -4,7 +4,7 @@
     "board/esp32-wrover-kit-3.3v.cfg"
   ],
   "idf.port": "/dev/ttyUSB0",
-  "idf.currentSetup": "/home/magnus/.espressif/v5.5.3/esp-idf",
+  "idf.currentSetup": "/home/magnus/.espressif/v6.0.1/esp-idf",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32"
   },
@@ -14,5 +14,6 @@
     "--query-driver=**",
     "--compile-commands-dir=/home/magnus/esp_projects/Air_qiality/build"
   ],
-  "idf.flashType": "UART"
+  "idf.flashType": "UART",
+  "C_Cpp.errorSquiggles": "disabled"
 }

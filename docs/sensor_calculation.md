@@ -60,9 +60,12 @@ Stored per-gas calibration data:
 
 ## 4. Current ppm estimate
 
-The current implementation uses a first-pass inverse-resistance model:
+For this board's observed behavior, higher gas concentration lowers the analog output
+voltage and therefore raises the derived sensor resistance.
 
-`ppm = Cref * (Rref / Rs)`
+So the current implementation uses a first-pass direct-resistance model:
+
+`ppm = Cref * (Rs / Rref)`
 
 Where:
 
@@ -70,8 +73,8 @@ Where:
 - `Rref` is the resistance measured during calibration
 - `Rs` is the current live resistance
 
-This assumes concentration is inversely proportional to sensor resistance around the
-calibration point.
+This assumes concentration is proportional to sensor resistance around the
+calibration point for this wiring/sensor response.
 
 ## 5. Important limitation
 

@@ -217,10 +217,10 @@ static float estimate_ppm(float resistance_ohms, const sensor_calibration_point_
         return -1.0f;
     }
 
-    // First-pass model: ppm scales inversely with sensor resistance relative to the
-    // reference calibration point. This keeps the pipeline usable now and can be
-    // replaced later with a multi-point curve fit without changing storage shape.
-    float ratio = calibration->reference_resistance_ohms / resistance_ohms;
+    // First-pass model for this board: higher gas concentration drives the measured
+    // output voltage down, which makes the derived sensor resistance go up.
+    // So ppm should scale with Rs/Rref instead of the inverse.
+    float ratio = resistance_ohms / calibration->reference_resistance_ohms;
     float ppm = calibration->reference_ppm * ratio;
     if (ppm < 0.0f || !isfinite(ppm))
     {

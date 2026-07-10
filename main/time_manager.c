@@ -13,6 +13,7 @@
 #include "esp_netif_sntp.h"
 #include "nvs.h"
 
+#include "telemetry_pipeline.h"
 #include "wifi_manager.h"
 
 #define TIME_SYNC_TASK_STACK 4096
@@ -132,7 +133,7 @@ static void restore_time_from_snapshot_if_available(void)
     ESP_LOGI(TAG, "Restored estimated time from saved snapshot");
 }
 
-static void update_sync_state_from_system_time(void)
+static void update_sync_state_from_system_time(bool trusted_sync)
 {
     if (!system_time_valid()) {
         s_time_synced = false;
@@ -142,20 +143,25 @@ static void update_sync_state_from_system_time(void)
     struct timeval tv = {0};
     gettimeofday(&tv, NULL);
     s_last_sync_epoch_ms = ((uint64_t)tv.tv_sec * 1000ULL) + (uint64_t)(tv.tv_usec / 1000ULL);
-    s_time_synced = true;
-    s_time_estimated = false;
+    s_time_synced = trusted_sync;
+    s_time_estimated = !trusted_sync;
 
     struct tm tm_utc = {0};
     gmtime_r(&tv.tv_sec, &tm_utc);
-    strftime(s_status, sizeof(s_status), "synced %Y-%m-%d %H:%M:%S UTC", &tm_utc);
-    maybe_persist_snapshot(s_last_sync_epoch_ms);
+    if (trusted_sync) {
+        strftime(s_status, sizeof(s_status), "synced %Y-%m-%d %H:%M:%S UTC", &tm_utc);
+        maybe_persist_snapshot(s_last_sync_epoch_ms);
+    } else {
+        strftime(s_status, sizeof(s_status), "estimated %Y-%m-%d %H:%M:%S UTC", &tm_utc);
+    }
 }
 
 static void time_sync_notification_cb(struct timeval *tv)
 {
     (void)tv;
-    update_sync_state_from_system_time();
+    update_sync_state_from_system_time(true);
     ESP_LOGI(TAG, "System time synchronized");
+    telemetry_pipeline_handle_time_sync();
 }
 
 static void init_sntp_once(void)
@@ -197,7 +203,7 @@ static void time_sync_task(void *arg)
 
     init_sntp_once();
     restore_time_from_snapshot_if_available();
-    update_sync_state_from_system_time();
+    update_sync_state_from_system_time(false);
 
     while (true) {
         TickType_t now_tick = xTaskGetTickCount();
@@ -219,7 +225,7 @@ static void time_sync_task(void *arg)
             esp_netif_sntp_start();
             esp_err_t err = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(TIME_SYNC_WAIT_MS));
             if ((err == ESP_OK || err == ESP_ERR_NOT_FINISHED) && system_time_valid()) {
-                update_sync_state_from_system_time();
+                update_sync_state_from_system_time(true);
                 s_retry_delay_ms = TIME_SYNC_RETRY_INITIAL_MS;
                 s_next_retry_tick = 0;
             } else {
@@ -252,7 +258,7 @@ void time_manager_init(void)
 bool time_manager_is_synchronized(void)
 {
     if (!s_time_synced && system_time_valid()) {
-        update_sync_state_from_system_time();
+        update_sync_state_from_system_time(false);
     }
     return s_time_synced;
 }

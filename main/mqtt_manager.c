@@ -1,5 +1,6 @@
 #include "mqtt_manager.h"
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
@@ -16,6 +17,7 @@
 #include "heater.h"
 #include "sd_card.h"
 #include "sensor.h"
+#include "site_config.h"
 #include "telemetry_pipeline.h"
 #include "time_manager.h"
 #include "wifi_manager.h"
@@ -55,17 +57,25 @@ static void build_telemetry(char *buf, size_t len)
 {
     char ip_str[16] = "0.0.0.0";
     char sd_status[96] = {0};
+    char location_name[96] = {0};
     telemetry_sample_t sample = {0};
     bool have_sample = telemetry_pipeline_get_latest(&sample);
     sensor_snapshot_t sensor_snapshot = {0};
+    site_config_t site = {0};
     if (!have_sample) {
         sensor_read_all(&sensor_snapshot);
+    }
+    if (!have_sample && site_config_load(&site) == ESP_OK) {
+        strlcpy(location_name, site.location_name, sizeof(location_name));
+    } else if (have_sample) {
+        strlcpy(location_name, sample.location_name, sizeof(location_name));
     }
     wifi_manager_get_ip(ip_str, sizeof(ip_str));
     sd_card_get_status(sd_status, sizeof(sd_status));
 
     snprintf(buf, len,
              "{\"device_id\":\"%s\",\"nh3_raw\":%d,\"red_raw\":%d,\"ox_raw\":%d,"
+             "\"location_name\":\"%s\",\"latitude\":\"%s\",\"longitude\":\"%s\","
              "\"nh3_mv\":%d,\"red_mv\":%d,\"ox_mv\":%d,"
              "\"nh3_res_ohms\":%.3f,\"red_res_ohms\":%.3f,\"ox_res_ohms\":%.3f,"
              "\"nh3_ppm\":%.3f,\"red_ppm\":%.3f,\"ox_ppm\":%.3f,"
@@ -76,6 +86,9 @@ static void build_telemetry(char *buf, size_t len)
              have_sample ? sample.nh3_raw : sensor_snapshot.nh3.raw,
              have_sample ? sample.red_raw : sensor_snapshot.red.raw,
              have_sample ? sample.ox_raw : sensor_snapshot.ox.raw,
+             have_sample ? sample.location_name : location_name,
+             have_sample ? sample.latitude : site.latitude,
+             have_sample ? sample.longitude : site.longitude,
              have_sample ? sample.nh3_mv : sensor_snapshot.nh3.mv,
              have_sample ? sample.red_mv : sensor_snapshot.red.mv,
              have_sample ? sample.ox_mv : sensor_snapshot.ox.mv,

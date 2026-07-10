@@ -5,9 +5,13 @@
 #include <stdint.h>
 
 typedef struct {
+    char sample_uuid[72];
     uint64_t sample_id;
     uint64_t timestamp_ms;
     uint64_t uptime_ms;
+    char location_name[64];
+    char latitude[24];
+    char longitude[24];
     int nh3_raw;
     int red_raw;
     int ox_raw;
@@ -32,6 +36,10 @@ typedef struct {
 
 void telemetry_pipeline_init(void);
 
+void telemetry_pipeline_handle_time_sync(void);
+
 bool telemetry_pipeline_get_latest(telemetry_sample_t *sample);
 
 void telemetry_pipeline_get_status(char *buf, size_t len);
+
+bool telemetry_pipeline_get_today_file(char *buf, size_t len);

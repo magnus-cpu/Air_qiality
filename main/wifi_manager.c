@@ -11,6 +11,7 @@
 
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "nvs.h"
@@ -22,7 +23,7 @@ static const char *TAG = "wifi_manager";
 #define WIFI_PASS_KEY  "pass"
 #define WIFI_HISTORY_KEY "history"
 
-#define AP_SSID        "AirQuality-Setup"
+#define AP_SSID_PREFIX "AirQuality"
 #define AP_PASS        "airquality"
 #define AP_CHANNEL     10
 #define AP_MAX_CONN    4
@@ -44,6 +45,21 @@ typedef struct {
 static bool ssid_matches_record(const wifi_ap_record_t *record, const char *ssid)
 {
     return strncmp((const char *)record->ssid, ssid, sizeof(record->ssid)) == 0;
+}
+
+static void build_ap_ssid(char *ssid, size_t ssid_len)
+{
+    uint8_t mac[6] = {0};
+    if (!ssid || ssid_len == 0) {
+        return;
+    }
+
+    if (esp_read_mac(mac, ESP_MAC_WIFI_STA) == ESP_OK) {
+        snprintf(ssid, ssid_len, AP_SSID_PREFIX "-%02X%02X", mac[4], mac[5]);
+        return;
+    }
+
+    strlcpy(ssid, AP_SSID_PREFIX "-SETUP", ssid_len);
 }
 
 static esp_err_t load_wifi_history(wifi_saved_credential_t *history, size_t max_history, size_t *loaded)
@@ -346,8 +362,10 @@ static void wifi_start_apsta(const char *sta_ssid, const char *sta_pass)
             .authmode = WIFI_AUTH_WPA_WPA2_PSK,
         }
     };
-    strncpy((char *)ap_config.ap.ssid, AP_SSID, sizeof(ap_config.ap.ssid));
-    ap_config.ap.ssid_len = strlen(AP_SSID);
+    char ap_ssid[33] = {0};
+    build_ap_ssid(ap_ssid, sizeof(ap_ssid));
+    strncpy((char *)ap_config.ap.ssid, ap_ssid, sizeof(ap_config.ap.ssid));
+    ap_config.ap.ssid_len = strlen(ap_ssid);
     strncpy((char *)ap_config.ap.password, AP_PASS, sizeof(ap_config.ap.password));
 
     if (strlen(AP_PASS) == 0) {
@@ -373,7 +391,7 @@ static void wifi_start_apsta(const char *sta_ssid, const char *sta_pass)
 
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "AP SSID: %s  PASS: %s", AP_SSID, AP_PASS);
+    ESP_LOGI(TAG, "AP SSID: %s  PASS: %s", ap_ssid, AP_PASS);
     ESP_LOGI(TAG, "Open http://192.168.4.1/ for setup");
 }
 
@@ -535,6 +553,10 @@ size_t wifi_manager_get_saved_networks(wifi_manager_saved_network_t *networks, s
 
 bool wifi_manager_is_connected(void)
 {
+    if (!s_wifi_event_group) {
+        return false;
+    }
+
     EventBits_t bits = xEventGroupGetBits(s_wifi_event_group);
     return (bits & WIFI_CONNECTED_BIT) != 0;
 }
